@@ -246,4 +246,6 @@ fabric.properties
 *.zip
 *.*~
 *.swp
+*.parquet
 data
+
