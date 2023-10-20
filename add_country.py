@@ -6,12 +6,12 @@
 Add country column.
 """
 from argparse import ArgumentParser, RawTextHelpFormatter
-from logging import basicConfig, StreamHandler, Formatter, getLogger, debug, info, error, DEBUG
+from logging import basicConfig, StreamHandler, Formatter, getLogger, debug, info, warning, error, DEBUG
 from os.path import split, splitext
 
 from glob2 import glob
-from pandas import DataFrame, read_csv, read_parquet
-from reverse_geocode import search  # pip install reverse_engineer
+from pandas import DataFrame, Series, read_csv, read_parquet
+from geolocator import osm  # pip install geocoder
 
 from csv2parquet import multiprocessing_wrapper
 
@@ -68,7 +68,8 @@ def write_file(df: DataFrame, path: str, file_type: str):
     else:
         msg = f"unsupported file_type: {file_type}"
         error(msg)
-        raise msg
+        raise ValueError(msg)
+    debug(f"written {df.shape[0]} rows into {split(path)[1]}")
 
 
 def add_suffix_to_filename(path: str, suffix: str) -> str:
@@ -76,13 +77,6 @@ def add_suffix_to_filename(path: str, suffix: str) -> str:
     assert isinstance(suffix, str)
     path_without_extension, extension = splitext(path)
     return f"{path_without_extension}{suffix}.{extension}"
-
-
-def add_country_to_file(src_path: str, dest_suffix: str):
-    file_type = splitext(src_path)[1].lower()
-    df = read_file(src_path)
-    df["Country"] = [address['country'] for address in search((df["Latitude"], df["Longitude"]), mode=2)]
-    write_file(df, add_suffix_to_filename(src_path, dest_suffix), file_type)
 
 
 """
@@ -117,15 +111,33 @@ class AddCountry:
         # destructor content here if required
         debug(f'{str(self.__class__.__name__)} destructor completed.')
 
+    def add_country_to_file(self, src_path: str):
+        def get_country(coordinates: Series) -> str:
+            location = None
+            try:
+                location = osm((coordinates["Latitude"], coordinates["Longitude"]), method='reverse')
+            except ValueError as e:
+                warning(f"unknown location for {coordinates} - {e}")
+            if location:
+                return location.json['country']
+            else:
+                return "No country"
+
+        file_type = splitext(src_path)[1].lower()
+        df = read_file(src_path)
+        df["Country"] = df[["Latitude", "Longitude"]].apply(get_country, axis=1)
+        write_file(df, add_suffix_to_filename(src_path, self._dest_suffix), file_type)
+
     def run(self):
         """
         Main program.
         """
         files = glob(self._src_path)
-        debug(f"found {len(files)} files")
+        len_files = len(files)
+        debug(f"found {len_files} files")
 
-        multiprocessing_wrapper(add_country_to_file, files, enable_multiprocessing=True)
-        debug(f"finished processing {len(files)} files")
+        multiprocessing_wrapper(self.add_country_to_file, files, enable_multiprocessing=len_files > 1)
+        debug(f"finished processing {len_files} files")
 
 
 """
