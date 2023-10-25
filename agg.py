@@ -49,13 +49,15 @@ def convert_meter_to_angle(meters: Union[int, float] = 10) -> float:
     return meters / (earth_radius * 1000) * 180 / pi
 
 
-def read_file(path: str) -> DataFrame:
+def read_file(path: str, cols: List[str]) -> DataFrame:
     assert isinstance(path, str)
+    assert isinstance(cols, list)
+    assert all(isinstance(col, str) for col in cols)
     file_type = splitext(path)[1].lower()
     if file_type.endswith('csv'):
-        df = read_csv(path, index_col=False, skipinitialspace=True, low_memory=True)
+        df = read_csv(path, index_col=False, usecols=cols, skipinitialspace=True, low_memory=True)
     elif file_type.endswith('parquet'):
-        df = read_parquet(path)
+        df = read_parquet(path, columns=cols)  # engine='fastparquet'
     else:
         msg = f"unsupported file {split(path)[1]}"
         error(msg)
@@ -77,7 +79,7 @@ def write_file(df: DataFrame, path: str, file_type: str):
         msg = f"unsupported file_type: {file_type}"
         error(msg)
         raise ValueError(msg)
-    debug(f"written {df.shape[0]} rows into {split(path)[1]}")
+    debug(f"{split(path)[1]} written {df.shape[0]} rows into {split(path)[1]}")
 
 
 def add_suffix_to_filename(path: str, suffix: str) -> str:
@@ -126,34 +128,45 @@ class GeoAggregator:
         # destructor content here if required
         debug(f'{str(self.__class__.__name__)} destructor completed.')
 
-    def read(self, file: str):
-        self._df = read_file(file)
-        self._df = self._df[["Latitude", "Longitude", "Data"]]  # only interested in these columns
-        self._df["Data"] /= 10  # JDS = Data / 10
+    @staticmethod
+    def read(file: str) -> DataFrame:
+        filename = split(file)[1]
+        debug(f"reading {filename}")
+        df = read_file(file, ["Latitude", "Longitude", "Data"])
+        debug(f"{filename} read with size {df.shape}")
+        df["Data"] /= 10  # JDS = Data / 10
+        return df
 
-    def reduce_resolution(self, cols: Union[None, str, List[str]] = None, by: Union[None, int, float] = None):
+    def reduce_resolution(self, df: DataFrame, cols: Union[None, str, List[str]] = None,
+                          by: Union[None, int, float] = None) -> DataFrame:
         if cols is None:  # default
             cols = ["Latitude", "Longitude"]
         if isinstance(cols, str):
             cols = [cols]
+        df.dropna(subset=cols, inplace=True)
         if by is None:  # default
             by = self._size
+        assert by > 0
         for col in cols:
-            self._df[col] = (self._df[col] / by).round(0).astype(int)
+            df[col] = (df[col] / by).round(0).astype(int)
+        return df
 
     def geo_aggregate(self, file: str):
-        self.read(file)
+        df = self.read(file)
         projection = Proj(proj='utm', zone=15, ellps='WGS84', preserve_units=False)
         # Apply projection Latitude & Longitude angles to meters.
-        self._df['Easting'], self._df['Northing'] = projection(self._df['Longitude'].to_numpy(),
-                                                               self._df['Latitude'].to_numpy())
-        self.reduce_resolution(cols=['Easting', 'Northing'], by=self._size)
-        grouped = self._df.groupby(['Easting', 'Northing'])
+        df['Easting'], df['Northing'] = projection(df['Longitude'].to_numpy(), df['Latitude'].to_numpy(), errcheck=True)
+        debug("projection to meters completed")
+        df = self.reduce_resolution(df, cols=['Easting', 'Northing'], by=self._size)
+        debug(f"resolution reduced by {self._size}, now size {df.shape}")
+        grouped = df.groupby(['Easting', 'Northing'])
         aggregated = grouped["Data"].agg(self._aggregation_function).reset_index()
+        debug(f"aggregation completed with size {aggregated.shape}")
         # Convert the 'Easting' and 'Northing' back to longitude and latitude
         aggregated['Longitude'], aggregated['Latitude'] = projection(aggregated['Easting'].to_numpy() * self._size,
                                                                      aggregated['Northing'].to_numpy() * self._size,
                                                                      inverse=True)
+        debug("inverse projection (back to latitude and longitude) completed")
         write_file(aggregated.drop(columns=['Easting', 'Northing']),
                    path=add_suffix_to_filename(file, self._dest_suffix),
                    file_type=splitext(file)[1].lower())
