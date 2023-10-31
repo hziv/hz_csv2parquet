@@ -6,13 +6,13 @@
 Add country column.
 """
 from argparse import ArgumentParser, RawTextHelpFormatter
-from logging import basicConfig, StreamHandler, Formatter, getLogger, debug, info, error, DEBUG
+from logging import basicConfig, StreamHandler, Formatter, getLogger, debug, info, error, DEBUG, ERROR
 from os.path import split, splitext
 from typing import Union, List
 
 from glob2 import glob
-from numpy import pi, cos, arange, count_nonzero
-from pandas import DataFrame, read_csv, read_parquet
+from numpy import ndarray, pi, cos, arange, count_nonzero
+from pandas import DataFrame, Series, read_csv, read_parquet
 
 from csv2parquet import multiprocessing_wrapper
 
@@ -297,6 +297,48 @@ class GeoAggregator:
         df["Data"] /= 10  # JDS = Data / 10
         return df
 
+    def gridify_latitude(self, df: DataFrame,
+                         by_meters: Union[None, int, float] = None,
+                         lat_col: str = "Latitude") -> Series:
+        if by_meters is None:  # default
+            by_meters = self._size
+        assert df.shape[0] > 0  # not emtpy
+        latitude_grid_size = convert_meters_to_latitude_angles(by_meters)
+        new_latitude_values = (df[lat_col] / latitude_grid_size).round(0) * latitude_grid_size
+        debug(f"latitude gridification completed with {len(new_latitude_values)} values")
+        return new_latitude_values
+
+    def gridify_longitude(self, df: DataFrame,
+                          by_meters: Union[None, int, float] = None,
+                          lon_col: str = "Longitude",
+                          lat_col: str = "Latitude") -> ndarray:
+        def per_longitude_subset(subset: DataFrame) -> Union[int, float, ndarray]:
+            assert isinstance(subset, DataFrame)
+            assert subset.shape[0] > 0
+            subset_latitude_value = subset[lat_col].values[0]
+            grid_size = convert_meters_to_longitude_angle(by_meters, subset_latitude_value)
+            ret = (subset[lon_col] / grid_size).round(0) * grid_size
+            debug(f"longitude gridification completed for latitude of {subset_latitude_value} with "
+                  f"{ret.shape[0]} values")
+            return ret
+
+        if by_meters is None:  # default
+            by_meters = self._size
+        assert df.shape[0] > 0  # not emtpy
+        ret = df.groupby(lon_col, group_keys=False).apply(per_longitude_subset).to_numpy()
+        debug(f"longitude gridification completed with {len(ret)} values")
+        return ret
+
+    def gridify_latitude_and_longitude(self, df: DataFrame,
+                                       by_meters: Union[None, int, float] = None,
+                                       lat_col: str = "Latitude",
+                                       lon_col: str = "Longitude") -> DataFrame:
+        if by_meters is None:  # default
+            by_meters = self._size
+        df[lat_col] = self.gridify_latitude(df, by_meters, lat_col)  # important to run latitude first
+        df[lon_col] = df.groupby(lat_col, group_keys=False).apply(self.gridify_longitude)
+        return df
+
     def reduce_resolution(self, df: DataFrame, by_meters: Union[None, int, float] = None) -> DataFrame:
         assert isinstance(df, DataFrame)
         debug(f"high resolution data size (with NaNs) {df.shape}")
@@ -339,7 +381,8 @@ class GeoAggregator:
 
     def geo_aggregate(self, file: str):
         df = self.read(file)
-        df = self.reduce_resolution(df, by_meters=self._size)
+        # df = self.reduce_resolution(df, by_meters=self._size)
+        df = self.gridify_latitude_and_longitude(df, self._size)
         df = self.aggregate(df)
         write_file(df, path=add_suffix_to_filename(file, self._dest_suffix), file_type=splitext(file)[1].lower())
 
@@ -451,6 +494,7 @@ def main():
     assert len(args.size) == 1
     assert isinstance(args.size[0], (int, float))
     assert args.size[0] >= 0  # must be positive
+    assert isinstance(args.debug, bool)
 
     log_filename = f'{no_extension_default_name}.log'
     try:
@@ -461,6 +505,7 @@ def main():
                               f'application. Error: {err}\n')
 
     console = StreamHandler()
+    console.setLevel(ERROR)
     if args.debug:
         console.setLevel(DEBUG)
     formatter = Formatter('%(threadName)-8s, %(name)-15s: %(levelname)-8s %(message)s')
@@ -470,12 +515,6 @@ def main():
     getLogger('main')
     info(f"Successfully opened log file named: {log_filename}")
     debug(f"Program run with the following arguments: {str(args)}")
-
-    # ---------------------------------
-    # Debug mode
-    # ---------------------------------
-
-    assert isinstance(args.debug, bool)
 
     # ---------------------------------
     # Instantiation
