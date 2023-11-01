@@ -8,11 +8,12 @@ Add country column.
 from argparse import ArgumentParser, RawTextHelpFormatter
 from logging import basicConfig, StreamHandler, Formatter, getLogger, debug, info, error, DEBUG, ERROR
 from os.path import split, splitext
-from typing import Union, List
+from typing import Union, List, Tuple
 
 from glob2 import glob
-from numpy import ndarray, pi, cos, arange, count_nonzero
+from numpy import ndarray, pi, cos, arange, count_nonzero, digitize, unique
 from pandas import DataFrame, Series, read_csv, read_parquet
+from tqdm import tqdm
 
 from csv2parquet import multiprocessing_wrapper
 
@@ -100,9 +101,11 @@ def convert_meters_to_latitude_angles(meters: Union[int, float] = 10) -> float:
     return lat_angle
 
 
-def convert_meters_to_longitude_angle(meters: Union[int, float], latitude_angle_for_compensation: float) -> float:
+def convert_meters_to_longitude_angle(meters: Union[int, float],
+                                      latitude_angle_for_compensation: Union[int, float]) -> float:
     assert isinstance(meters, (int, float))
-    assert isinstance(latitude_angle_for_compensation, float) and (-360 <= latitude_angle_for_compensation <= 360)
+    assert isinstance(latitude_angle_for_compensation, (int, float))
+    assert -360 <= latitude_angle_for_compensation <= 360
     # Convert latitude degrees to meters (approximately)
     lat_meters = (111132.92 - 559.82 * cos(2 * latitude_angle_for_compensation) +
                   1.175 * cos(4 * latitude_angle_for_compensation))
@@ -265,7 +268,7 @@ class GeoAggregator:
     _dest_suffix = ''
     _df = DataFrame()
     _aggregation_function = ''
-    _size = 0
+    _size_of_grid_in_meters = 0
 
     def __init__(self, src_path: str, dest_suffix: str, mode: str, size: float) -> None:
         """
@@ -281,7 +284,7 @@ class GeoAggregator:
         assert isinstance(mode, str)
         self._aggregation_function = mode.lower()
         assert isinstance(size, (int, float))
-        self._size = size
+        self._size_of_grid_in_meters = size
 
     def __del__(self):
         """ Destructor. """
@@ -301,11 +304,11 @@ class GeoAggregator:
                          by_meters: Union[None, int, float] = None,
                          lat_col: str = "Latitude") -> Series:
         if by_meters is None:  # default
-            by_meters = self._size
+            by_meters = self._size_of_grid_in_meters
         assert df.shape[0] > 0  # not emtpy
         latitude_grid_size = convert_meters_to_latitude_angles(by_meters)
         new_latitude_values = (df[lat_col] / latitude_grid_size).round(0) * latitude_grid_size
-        debug(f"latitude gridification completed with {len(new_latitude_values)} values")
+        # debug(f"latitude gridification completed with {len(new_latitude_values)} values")
         return new_latitude_values
 
     def gridify_longitude(self, df: DataFrame,
@@ -317,13 +320,13 @@ class GeoAggregator:
             assert subset.shape[0] > 0
             subset_latitude_value = subset[lat_col].values[0]
             grid_size = convert_meters_to_longitude_angle(by_meters, subset_latitude_value)
-            ret = (subset[lon_col] / grid_size).round(0) * grid_size
-            debug(f"longitude gridification completed for latitude of {subset_latitude_value} with "
-                  f"{ret.shape[0]} values")
-            return ret
+            longitude_subset = (subset[lon_col] / grid_size).round(0) * grid_size
+            # debug(f"longitude gridification completed for latitude of {subset_latitude_value} with "
+            #       f"{ret.shape[0]} values")
+            return longitude_subset.to_numpy()
 
         if by_meters is None:  # default
-            by_meters = self._size
+            by_meters = self._size_of_grid_in_meters
         assert df.shape[0] > 0  # not emtpy
         ret = df.groupby(lon_col, group_keys=False).apply(per_longitude_subset).to_numpy()
         debug(f"longitude gridification completed with {len(ret)} values")
@@ -334,10 +337,64 @@ class GeoAggregator:
                                        lat_col: str = "Latitude",
                                        lon_col: str = "Longitude") -> DataFrame:
         if by_meters is None:  # default
-            by_meters = self._size
+            by_meters = self._size_of_grid_in_meters
         df[lat_col] = self.gridify_latitude(df, by_meters, lat_col)  # important to run latitude first
         df[lon_col] = df.groupby(lat_col, group_keys=False).apply(self.gridify_longitude)
+        debug(f"gridification of latitude and longitude completed with size {df.shape}")
         return df
+
+    def identify_populated_girds(self, df: DataFrame,
+                                 lat_col: str = "Latitude", lon_col: str = "Longitude",
+                                 lat_grid_size: Union[None, float] = None,
+                                 lon_grid_size: Union[None, float] = None) -> Tuple[ndarray, ndarray]:
+        """
+        Returns (latitude_bins, longitude_bins)
+        """
+        def get_populated_bins(full_df: DataFrame, col: str, range_min: int, range_max: int,
+                               size_of_grid_in_meters: float) -> ndarray:
+            bins = arange(range_min, range_max, size_of_grid_in_meters, dtype=float)  # in angles
+            populated_indices = digitize(full_df[col], bins) - 1  # count indices from zero
+            populated_bins = unique(populated_indices)
+            debug(f"found {len(populated_bins)} out of {len(bins)} populated {col} bins")
+            return bins[populated_bins]
+
+        if lat_grid_size is None:  # default
+            lat_grid_size = convert_meters_to_latitude_angles(self._size_of_grid_in_meters)
+        if lon_grid_size is None:  # default
+            lon_grid_size = convert_meters_to_longitude_angle(self._size_of_grid_in_meters, 0)  # equator
+        populated_latitude_bins = get_populated_bins(df, lat_col, -90, 90, lat_grid_size)
+        populated_longitude_bins = get_populated_bins(df, lon_col, -180, 180, lon_grid_size)
+        return populated_latitude_bins, populated_longitude_bins
+
+    def aggregate_populated_grids(self, df: DataFrame,
+                                  populated_latitude_bins: ndarray,
+                                  populated_longitude_bins: ndarray,
+                                  lat_grid_angle_size: Union[None, float] = None,
+                                  lon_grid_angle_size: Union[None, float] = None,
+                                  lat_col: str = "Latitude", lon_col: str = "Longitude",
+                                  val_col: str = "Data") -> DataFrame:
+        ret_val = {lat_col: [],
+                   lon_col: [],
+                   val_col: []}
+        if lat_grid_angle_size is None:  # default
+            lat_grid_angle_size = convert_meters_to_latitude_angles(self._size_of_grid_in_meters)
+        if lon_grid_angle_size is None:  # default
+            lon_grid_angle_size = convert_meters_to_longitude_angle(self._size_of_grid_in_meters, 0)  # equator
+        # iterate
+        for lat_bin_start in tqdm(populated_latitude_bins):
+            lat_idxs = df[lat_col].between(lat_bin_start, lat_bin_start + lat_grid_angle_size, 'left')
+            assert lat_idxs.sum() > 0
+            for lon_bin_start in populated_longitude_bins:
+                lon_idxs = df.loc[lat_idxs, lon_col].between(lon_bin_start, lon_bin_start + lon_grid_angle_size, 'left')
+                if lon_idxs.sum() > 0:  # not empty
+                    idxs = lat_idxs & lon_idxs
+                    assert idxs.sum() > 0
+                    ret_val[lat_col].append(lat_bin_start)
+                    ret_val[lon_col].append(lon_bin_start)
+                    ret_val[val_col].append(df.loc[idxs, val_col].apply(self._aggregation_function))
+        ret_val = DataFrame(ret_val)
+        debug(f"aggregated {self._aggregation_function} size {ret_val.shape}")
+        return ret_val
 
     def reduce_resolution(self, df: DataFrame, by_meters: Union[None, int, float] = None) -> DataFrame:
         assert isinstance(df, DataFrame)
@@ -345,7 +402,7 @@ class GeoAggregator:
         df.dropna(subset=["Latitude", "Longitude"], inplace=True)  # clean NaNs
         debug(f"high resolution data size (without NaNs) {df.shape}")
         if by_meters is None:  # default
-            by_meters = self._size
+            by_meters = self._size_of_grid_in_meters
         assert by_meters > 0
         if df.shape[0] > 0:  # not empty
             lat_min, lat_max = df['Latitude'].min(), df['Latitude'].max()
@@ -376,15 +433,22 @@ class GeoAggregator:
     def aggregate(self, df: DataFrame) -> DataFrame:
         assert isinstance(df, DataFrame)
         aggregated = df.groupby(["Latitude", "Longitude"])["Data"].agg(self._aggregation_function)
-        debug(f"aggregated size {aggregated.shape}")
-        return aggregated.to_frame().reset_index()
+        ret_val = aggregated.to_frame().reset_index()
+        debug(f"aggregated size {ret_val.shape}")
+        return ret_val
 
     def geo_aggregate(self, file: str):
+        lat_grid_size = convert_meters_to_latitude_angles(self._size_of_grid_in_meters)
+        lon_grid_size = convert_meters_to_longitude_angle(self._size_of_grid_in_meters, 0)  # equator
         df = self.read(file)
+        populated_latitude_bins, populated_longitude_bins = (
+            self.identify_populated_girds(df, lat_grid_size=lat_grid_size, lon_grid_size=lon_grid_size))
+        aggregated = self.aggregate_populated_grids(df, populated_latitude_bins, populated_longitude_bins,
+                                                    lat_grid_size, lon_grid_size)
         # df = self.reduce_resolution(df, by_meters=self._size)
-        df = self.gridify_latitude_and_longitude(df, self._size)
-        df = self.aggregate(df)
-        write_file(df, path=add_suffix_to_filename(file, self._dest_suffix), file_type=splitext(file)[1].lower())
+        # df = self.gridify_latitude_and_longitude(df, self._size_of_grid_in_meters)
+        # df = self.aggregate(df)
+        write_file(aggregated, path=add_suffix_to_filename(file, self._dest_suffix), file_type=splitext(file)[1].lower())
 
     def run(self):
         """
