@@ -8,12 +8,11 @@ Add country column.
 from argparse import ArgumentParser, RawTextHelpFormatter
 from logging import basicConfig, StreamHandler, Formatter, getLogger, debug, info, error, DEBUG, ERROR
 from os.path import split, splitext
-from typing import Union, List, Tuple
+from typing import Union, List
 
 from glob2 import glob
-from numpy import ndarray, pi, cos, arange, count_nonzero, digitize, unique
-from pandas import DataFrame, Series, read_csv, read_parquet
-from tqdm import tqdm
+from numpy import pi, arange, digitize
+from pandas import DataFrame, read_csv, read_parquet
 
 from csv2parquet import multiprocessing_wrapper
 
@@ -43,12 +42,6 @@ GLOBAL VARIABLES
 FUNCTIONS
 =========
 """
-
-
-def convert_meter_to_angle(meters: Union[int, float] = 10) -> float:
-    assert isinstance(meters, (int, float))
-    earth_radius = 6371  # km average
-    return meters / (earth_radius * 1000) * 180 / pi
 
 
 def read_file(path: str, cols: List[str]) -> DataFrame:
@@ -101,161 +94,10 @@ def convert_meters_to_latitude_angles(meters: Union[int, float] = 10) -> float:
     return lat_angle
 
 
-def convert_meters_to_longitude_angle(meters: Union[int, float],
-                                      latitude_angle_for_compensation: Union[int, float]) -> float:
-    assert isinstance(meters, (int, float))
-    assert isinstance(latitude_angle_for_compensation, (int, float))
-    assert -360 <= latitude_angle_for_compensation <= 360
-    # Convert latitude degrees to meters (approximately)
-    lat_meters = (111132.92 - 559.82 * cos(2 * latitude_angle_for_compensation) +
-                  1.175 * cos(4 * latitude_angle_for_compensation))
-    # Convert meters to angles
-    grid_size_deg = meters / lat_meters
-    return grid_size_deg
-
-
 """
-==================
-PROGRESS BAR CLASS
-==================
-"""
-
-
-class ProgressBar:
-    """ Parse arguments. """
-
-    # class globals
-    _title_width = 20
-    _width = 32
-    _bar_prefix = ' |'
-    _bar_suffix = '| '
-    _empty_fill = ' '
-    _fill = '#'
-    progress_before_next = 0
-    debug = False
-    verbose = False
-    quiet = False
-
-    _progress = 0  # between 0 and _width -- used as filled portion of progress bar
-    _increment = 0  # between 0 and (_max - _min) -- used for X/Y indication right of progress bar
-
-    def __init__(self, text, maximum=10, minimum=0, verbosemode=''):
-        """ Initialising parsing arguments.
-        :param text: title of progress bar, displayed left of the progress bar
-        :type text: str
-        :param maximum: maximal value presented by 100% of progress bar
-        :type maximum: int
-        :param minimum: minimal value, zero by default
-        :type minimum: int
-        :param verbosemode: 'debug', 'verbose' or 'quiet'
-        :type verbosemode: str
-        """
-
-        self.log = getLogger(self.__class__.__name__)
-        assert isinstance(text, str)
-        assert isinstance(maximum, int)
-        assert isinstance(minimum, int)
-        assert maximum > minimum
-        self._text = text
-        self._min = minimum
-        self._max = maximum
-        self._progress = 0
-        self._increment = 0
-        # LOGGING PARAMETERS
-        assert isinstance(verbosemode, str)
-        assert verbosemode in ['', 'debug', 'verbose', 'quiet']
-        if verbosemode == 'debug':
-            self.debug = True
-        elif verbosemode == 'verbose':
-            self.verbose = True
-        elif verbosemode == 'quiet':
-            self.quiet = True
-        debug('{} started'.format(self._text))
-        self.update()
-
-    def __del__(self):
-        """ Destructor. """
-
-        # destructor content here if required
-        debug('{} destructor completed.'.format(str(self.__class__.__name__)))
-
-    @property
-    def width(self):
-        return self._width
-
-    @width.setter
-    def width(self, value):
-        """
-        Set length of the progress bar in characters.
-        :param value: number of characters
-        :type value: int
-        """
-        assert isinstance(value, int)
-        assert 0 < value < 80
-        self._width = value
-
-    @property
-    def title_width(self):
-        return self._title_width
-
-    @title_width.setter
-    def title_width(self, value):
-        """
-        Set padding width for text before the progress bar.
-        :param value: padding width in number of characters
-        :type value: int
-        """
-        assert isinstance(value, int)
-        assert 0 < value < 80
-        self._title_width = value
-
-    def next(self, n=1):
-        """ Increment progress bar state.
-        :param n: increment progress bar by n
-        :type n: int
-        """
-
-        assert isinstance(n, int)
-        assert n >= 0
-        if n > 0:
-            self._progress += 1 / (n * (self._max - self._min) / self._width)
-            if self._progress > self._width:
-                self._progress = self._width
-            self._increment += n
-            if float(self._progress) >= self.progress_before_next + 1 / self._width:
-                self.progress_before_next = self._progress
-                self.update()
-
-    def update(self, end_char='\r'):
-        """ Update progress bar on console.
-        :param end_char: character used to command cursor to get back to beginning of line without carriage return.
-        :type end_char: str
-        """
-
-        assert isinstance(end_char, str)
-        diff = self._max - self._min
-        bar = self._fill * int(self._progress)
-        empty = self._empty_fill * (self._width - int(self._progress))
-        if not self.debug and not self.verbose and not self.quiet:
-            print("{:<{}.{}s}{}{}{}{}{}/{}".format(self._text, self._title_width, self._title_width,
-                                                   self._bar_prefix, bar, empty, self._bar_suffix,
-                                                   str(self._increment), str(diff)), end=end_char)
-
-    def finish(self):
-        """ Clean up and release handles. """
-
-        self._progress = self._width
-        self._increment = self._max - self._min
-        if self._increment < 0:
-            self._increment = 0
-        self.update('\n')
-        debug('{} finished'.format(self._text))
-
-
-"""
-====================
-CSV TO PARQUET CLASS
-====================
+=====================
+GEO AGGREGATION CLASS
+=====================
 """
 
 
@@ -268,7 +110,8 @@ class GeoAggregator:
     _dest_suffix = ''
     _df = DataFrame()
     _aggregation_function = ''
-    _size_of_grid_in_meters = 0
+    _size_of_grid_in_angles = 0
+    _latitude_bins = None
 
     def __init__(self, src_path: str, dest_suffix: str, mode: str, size: float) -> None:
         """
@@ -284,7 +127,9 @@ class GeoAggregator:
         assert isinstance(mode, str)
         self._aggregation_function = mode.lower()
         assert isinstance(size, (int, float))
-        self._size_of_grid_in_meters = size
+        self._size_of_grid_in_angles = convert_meters_to_latitude_angles(size)
+        self._latitude_bins = arange(-90, 90, self._size_of_grid_in_angles, dtype=float)
+        self._longitude_bins = arange(-180, 180, self._size_of_grid_in_angles, dtype=float)  # ignoring latitude
 
     def __del__(self):
         """ Destructor. """
@@ -300,154 +145,22 @@ class GeoAggregator:
         df["Data"] /= 10  # JDS = Data / 10
         return df
 
-    def gridify_latitude(self, df: DataFrame,
-                         by_meters: Union[None, int, float] = None,
-                         lat_col: str = "Latitude") -> Series:
-        if by_meters is None:  # default
-            by_meters = self._size_of_grid_in_meters
-        assert df.shape[0] > 0  # not emtpy
-        latitude_grid_size = convert_meters_to_latitude_angles(by_meters)
-        new_latitude_values = (df[lat_col] / latitude_grid_size).round(0) * latitude_grid_size
-        # debug(f"latitude gridification completed with {len(new_latitude_values)} values")
-        return new_latitude_values
-
-    def gridify_longitude(self, df: DataFrame,
-                          by_meters: Union[None, int, float] = None,
-                          lon_col: str = "Longitude",
-                          lat_col: str = "Latitude") -> ndarray:
-        def per_longitude_subset(subset: DataFrame) -> Union[int, float, ndarray]:
-            assert isinstance(subset, DataFrame)
-            assert subset.shape[0] > 0
-            subset_latitude_value = subset[lat_col].values[0]
-            grid_size = convert_meters_to_longitude_angle(by_meters, subset_latitude_value)
-            longitude_subset = (subset[lon_col] / grid_size).round(0) * grid_size
-            # debug(f"longitude gridification completed for latitude of {subset_latitude_value} with "
-            #       f"{ret.shape[0]} values")
-            return longitude_subset.to_numpy()
-
-        if by_meters is None:  # default
-            by_meters = self._size_of_grid_in_meters
-        assert df.shape[0] > 0  # not emtpy
-        ret = df.groupby(lon_col, group_keys=False).apply(per_longitude_subset).to_numpy()
-        debug(f"longitude gridification completed with {len(ret)} values")
-        return ret
-
-    def gridify_latitude_and_longitude(self, df: DataFrame,
-                                       by_meters: Union[None, int, float] = None,
-                                       lat_col: str = "Latitude",
-                                       lon_col: str = "Longitude") -> DataFrame:
-        if by_meters is None:  # default
-            by_meters = self._size_of_grid_in_meters
-        df[lat_col] = self.gridify_latitude(df, by_meters, lat_col)  # important to run latitude first
-        df[lon_col] = df.groupby(lat_col, group_keys=False).apply(self.gridify_longitude)
-        debug(f"gridification of latitude and longitude completed with size {df.shape}")
-        return df
-
-    def identify_populated_girds(self, df: DataFrame,
-                                 lat_col: str = "Latitude", lon_col: str = "Longitude",
-                                 lat_grid_size: Union[None, float] = None,
-                                 lon_grid_size: Union[None, float] = None) -> Tuple[ndarray, ndarray]:
-        """
-        Returns (latitude_bins, longitude_bins)
-        """
-        def get_populated_bins(full_df: DataFrame, col: str, range_min: int, range_max: int,
-                               size_of_grid_in_meters: float) -> ndarray:
-            bins = arange(range_min, range_max, size_of_grid_in_meters, dtype=float)  # in angles
-            populated_indices = digitize(full_df[col], bins) - 1  # count indices from zero
-            populated_bins = unique(populated_indices)
-            debug(f"found {len(populated_bins)} out of {len(bins)} populated {col} bins")
-            return bins[populated_bins]
-
-        if lat_grid_size is None:  # default
-            lat_grid_size = convert_meters_to_latitude_angles(self._size_of_grid_in_meters)
-        if lon_grid_size is None:  # default
-            lon_grid_size = convert_meters_to_longitude_angle(self._size_of_grid_in_meters, 0)  # equator
-        populated_latitude_bins = get_populated_bins(df, lat_col, -90, 90, lat_grid_size)
-        populated_longitude_bins = get_populated_bins(df, lon_col, -180, 180, lon_grid_size)
-        return populated_latitude_bins, populated_longitude_bins
-
-    def aggregate_populated_grids(self, df: DataFrame,
-                                  populated_latitude_bins: ndarray,
-                                  populated_longitude_bins: ndarray,
-                                  lat_grid_angle_size: Union[None, float] = None,
-                                  lon_grid_angle_size: Union[None, float] = None,
-                                  lat_col: str = "Latitude", lon_col: str = "Longitude",
-                                  val_col: str = "Data") -> DataFrame:
-        ret_val = {lat_col: [],
-                   lon_col: [],
-                   val_col: []}
-        if lat_grid_angle_size is None:  # default
-            lat_grid_angle_size = convert_meters_to_latitude_angles(self._size_of_grid_in_meters)
-        if lon_grid_angle_size is None:  # default
-            lon_grid_angle_size = convert_meters_to_longitude_angle(self._size_of_grid_in_meters, 0)  # equator
-        # iterate
-        for lat_bin_start in tqdm(populated_latitude_bins):
-            lat_idxs = df[lat_col].between(lat_bin_start, lat_bin_start + lat_grid_angle_size, 'left')
-            assert lat_idxs.sum() > 0
-            for lon_bin_start in populated_longitude_bins:
-                lon_idxs = df.loc[lat_idxs, lon_col].between(lon_bin_start, lon_bin_start + lon_grid_angle_size, 'left')
-                if lon_idxs.sum() > 0:  # not empty
-                    idxs = lat_idxs & lon_idxs
-                    assert idxs.sum() > 0
-                    ret_val[lat_col].append(lat_bin_start)
-                    ret_val[lon_col].append(lon_bin_start)
-                    ret_val[val_col].append(df.loc[idxs, val_col].apply(self._aggregation_function))
-        ret_val = DataFrame(ret_val)
-        debug(f"aggregated {self._aggregation_function} size {ret_val.shape}")
-        return ret_val
-
-    def reduce_resolution(self, df: DataFrame, by_meters: Union[None, int, float] = None) -> DataFrame:
-        assert isinstance(df, DataFrame)
-        debug(f"high resolution data size (with NaNs) {df.shape}")
-        df.dropna(subset=["Latitude", "Longitude"], inplace=True)  # clean NaNs
-        debug(f"high resolution data size (without NaNs) {df.shape}")
-        if by_meters is None:  # default
-            by_meters = self._size_of_grid_in_meters
-        assert by_meters > 0
-        if df.shape[0] > 0:  # not empty
-            lat_min, lat_max = df['Latitude'].min(), df['Latitude'].max()
-            lon_min, lon_max = df['Longitude'].min(), df['Longitude'].max()
-            latitude_grid_size = convert_meters_to_latitude_angles(by_meters)
-            lat_range = arange(start=lat_min, stop=lat_max, step=latitude_grid_size)
-            i = 0
-            for lat_grid_cell in lat_range:
-                debug(f"reducing resolution for latitude [{i}/{len(lat_range)}]")
-                longitude_grid_size = convert_meters_to_longitude_angle(by_meters, lat_grid_cell)  # Lat. compensated
-                lat_idxs = ((lat_grid_cell <= df["Latitude"]) &
-                            (df["Latitude"] < lat_grid_cell + latitude_grid_size))
-                if count_nonzero(lat_idxs) > 0:
-                    df.loc[lat_idxs, "Latitude"] = lat_grid_cell + latitude_grid_size / 2  # centre
-                    lon_range = arange(start=lon_min, stop=lon_max, step=longitude_grid_size)
-                    progress_bar = ProgressBar('longitude', len(lon_range))
-                    for lon_grid_cell in lon_range:
-                        lon_idxs = ((lon_grid_cell <= df["Longitude"]) &
-                                    (df["Longitude"] < lon_grid_cell + longitude_grid_size))
-                        if count_nonzero(lon_idxs) > 0:
-                            df.loc[lon_idxs, "Longitude"] = lon_grid_cell + longitude_grid_size / 2  # centre
-                        progress_bar.next()
-                    progress_bar.finish()
-                i += 1
-        debug(f"resolution reduced by {by_meters} [meters], now size {df.shape}")
-        return df
-
-    def aggregate(self, df: DataFrame) -> DataFrame:
-        assert isinstance(df, DataFrame)
-        aggregated = df.groupby(["Latitude", "Longitude"])["Data"].agg(self._aggregation_function)
-        ret_val = aggregated.to_frame().reset_index()
-        debug(f"aggregated size {ret_val.shape}")
-        return ret_val
+    def iterate(self, df: DataFrame) -> DataFrame:
+        df['latitude_bin_id'] = digitize(df["Latitude"], self._latitude_bins) - 1  # bin indices from zero
+        df['longitude_bin_id'] = digitize(df["Longitude"], self._longitude_bins) - 1  # bin indices from zero
+        aggregated = (df.groupby(by=['latitude_bin_id', 'longitude_bin_id'])["Data"].
+                      apply(self._aggregation_function).to_frame().reset_index())
+        aggregated["Latitude"] = (self._latitude_bins[aggregated['latitude_bin_id'].values] +
+                                  self._size_of_grid_in_angles / 2)
+        aggregated["Longitude"] = (self._longitude_bins[aggregated['longitude_bin_id'].values] +
+                                   self._size_of_grid_in_angles / 2)
+        aggregated.drop(columns=['latitude_bin_id', 'longitude_bin_id'], inplace=True)
+        debug(f"aggregated {self._aggregation_function} size {aggregated.shape}")
+        return aggregated
 
     def geo_aggregate(self, file: str):
-        lat_grid_size = convert_meters_to_latitude_angles(self._size_of_grid_in_meters)
-        lon_grid_size = convert_meters_to_longitude_angle(self._size_of_grid_in_meters, 0)  # equator
         df = self.read(file)
-        populated_latitude_bins, populated_longitude_bins = (
-            self.identify_populated_girds(df, lat_grid_size=lat_grid_size, lon_grid_size=lon_grid_size))
-        aggregated = self.aggregate_populated_grids(df, populated_latitude_bins, populated_longitude_bins,
-                                                    lat_grid_size, lon_grid_size)
-        # df = self.reduce_resolution(df, by_meters=self._size)
-        # df = self.gridify_latitude_and_longitude(df, self._size_of_grid_in_meters)
-        # df = self.aggregate(df)
+        aggregated = self.iterate(df)
         write_file(aggregated, path=add_suffix_to_filename(file, self._dest_suffix), file_type=splitext(file)[1].lower())
 
     def run(self):
