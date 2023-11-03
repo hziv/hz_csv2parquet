@@ -146,10 +146,13 @@ class GeoAggregator:
         return df
 
     def iterate(self, df: DataFrame) -> DataFrame:
-        df['latitude_bin_id'] = digitize(df["Latitude"], self._latitude_bins) - 1  # bin indices from zero
-        df['longitude_bin_id'] = digitize(df["Longitude"], self._longitude_bins) - 1  # bin indices from zero
+        df.loc[:, 'latitude_bin_id'] = digitize(df["Latitude"], self._latitude_bins) - 1  # bin indices from zero
+        debug("latitude digitized")
+        df.loc[:, 'longitude_bin_id'] = digitize(df["Longitude"], self._longitude_bins) - 1  # bin indices from zero
+        debug("longitude digitized")
         aggregated = (df.groupby(by=['latitude_bin_id', 'longitude_bin_id'])["Data"].
                       apply(self._aggregation_function).to_frame().reset_index())
+        debug(f"aggregation completed with size {aggregated.shape}")
         aggregated["Latitude"] = (self._latitude_bins[aggregated['latitude_bin_id'].values] +
                                   self._size_of_grid_in_angles / 2)
         aggregated["Longitude"] = (self._longitude_bins[aggregated['longitude_bin_id'].values] +
@@ -160,12 +163,13 @@ class GeoAggregator:
 
     def geo_aggregate(self, df: Union[str, DataFrame]):
         if isinstance(df, str):
-            dest_suffix = add_suffix_to_filename(file, self._dest_suffix)
+            dest_suffix = add_suffix_to_filename(df, self._dest_suffix)
             df = self.read(df)
         else:
             dest_suffix = f"{self._dest_suffix}.parquet"
         aggregated = self.iterate(df)
-        write_file(aggregated, path=dest_apth, file_type=splitext(file)[1].lower())
+        # write_file(aggregated, path=dest_suffix)
+        aggregated.to_parquet(dest_suffix, index=False)
 
     def run(self, collate: bool = False):
         """
@@ -180,7 +184,9 @@ class GeoAggregator:
             for file in files:
                 dfs.append(self.read(file))
                 info(f"{file} read")
-            dfs = concat(dfs, axis=1).reset_index()
+            debug("concatenation starting")
+            dfs = concat(dfs, ignore_index=True)
+            debug(f"concatenation complete with size {dfs.shape}")
             self.geo_aggregate(dfs)
         else:
             multiprocessing_wrapper(self.geo_aggregate, files, enable_multiprocessing=len_files > 1)
