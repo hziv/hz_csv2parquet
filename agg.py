@@ -12,7 +12,7 @@ from typing import Union, List
 
 from glob2 import glob
 from numpy import pi, arange, digitize
-from pandas import DataFrame, read_csv, read_parquet
+from pandas import DataFrame, read_csv, read_parquet, concat
 
 from csv2parquet import multiprocessing_wrapper
 
@@ -158,12 +158,16 @@ class GeoAggregator:
         debug(f"aggregated {self._aggregation_function} size {aggregated.shape}")
         return aggregated
 
-    def geo_aggregate(self, file: str):
-        df = self.read(file)
+    def geo_aggregate(self, df: Union[str, DataFrame]):
+        if isinstance(df, str):
+            dest_suffix = add_suffix_to_filename(file, self._dest_suffix)
+            df = self.read(df)
+        else:
+            dest_suffix = f"{self._dest_suffix}.parquet"
         aggregated = self.iterate(df)
-        write_file(aggregated, path=add_suffix_to_filename(file, self._dest_suffix), file_type=splitext(file)[1].lower())
+        write_file(aggregated, path=dest_apth, file_type=splitext(file)[1].lower())
 
-    def run(self):
+    def run(self, collate: bool = False):
         """
         Main program.
         """
@@ -171,7 +175,15 @@ class GeoAggregator:
         len_files = len(files)
         debug(f"found {len_files} files")
 
-        multiprocessing_wrapper(self.geo_aggregate, files, enable_multiprocessing=len_files > 1)
+        if collate:
+            dfs = []
+            for file in files:
+                dfs.append(self.read(file))
+                info(f"{file} read")
+            dfs = concat(dfs, axis=1).reset_index()
+            self.geo_aggregate(dfs)
+        else:
+            multiprocessing_wrapper(self.geo_aggregate, files, enable_multiprocessing=len_files > 1)
         debug(f"finished processing {len_files} files")
 
 
@@ -213,7 +225,7 @@ class ArgumentsAndConfigProcessing:
         # destructor content here if required
         debug(f'{str(self.__class__.__name__)} destructor completed.')
 
-    def run(self):
+    def run(self, collate: bool = False):
         """
         Main program.
         """
@@ -221,7 +233,7 @@ class ArgumentsAndConfigProcessing:
                                    dest_suffix=self._dest_suffix,
                                    mode=self._mode,
                                    size=self._size)
-        aggregator.run()
+        aggregator.run(collate)
 
 
 """
@@ -248,9 +260,9 @@ def main():
                         choices=['mean', 'median', 'max'], help='aggregation mode, \'median\' by default')
     parser.add_argument('-s', dest='size', nargs=1, type=float, default=[10],
                         help='aggregation size in meters, default (unspecified) 10 meters.')
+    parser.add_argument('--collate', help='collate all input files', action='store_true')
 
-    group2 = parser.add_mutually_exclusive_group()
-    group2.add_argument('-d', '--debug', help='sets verbosity to display debug level messages',
+    parser.add_argument('-d', '--debug', help='sets verbosity to display debug level messages',
                         action="store_true")
 
     args = parser.parse_args()
@@ -271,6 +283,7 @@ def main():
     assert len(args.size) == 1
     assert isinstance(args.size[0], (int, float))
     assert args.size[0] >= 0  # must be positive
+    assert isinstance(args.collate, bool)
     assert isinstance(args.debug, bool)
 
     log_filename = f'{no_extension_default_name}.log'
@@ -301,7 +314,7 @@ def main():
                                                   dest_suffix=args.dest_suffix,
                                                   mode=args.mode[0],
                                                   size=args.size[0])
-    arg_processing.run()
+    arg_processing.run(args.collate)
     debug('Program execution completed. Starting clean-up.')
 
 
